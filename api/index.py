@@ -8,5 +8,6 @@ if str(ROOT_DIR) not in sys.path:
 
 os.environ.setdefault("RADAR_SIMULATION", "true")
 os.environ.setdefault("RADAR_DISABLE_READER_THREAD", "true")
+os.environ.setdefault("RADAR_SERVERLESS_AUTOSIM", "false")
 
 from radar_web import app
