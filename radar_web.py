@@ -11,7 +11,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from flask import Flask, jsonify, render_template, send_file
+from flask import Flask, jsonify, render_template, request, send_file
 
 try:
     import serial
@@ -44,6 +44,15 @@ DISABLE_READER_THREAD = os.getenv("RADAR_DISABLE_READER_THREAD", "false").strip(
     "yes",
     "on",
 }
+INGEST_TOKEN = os.getenv("RADAR_INGEST_TOKEN", "").strip()
+MAX_INGEST_BATCH = max(1, int(os.getenv("RADAR_INGEST_MAX_BATCH", "200")))
+SERVERLESS_AUTOSIM = os.getenv("RADAR_SERVERLESS_AUTOSIM", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SERVERLESS_FRESH_SECONDS = max(0.1, float(os.getenv("RADAR_SERVERLESS_FRESH_SECONDS", "2.5")))
 
 points_lock = threading.Lock()
 radar_points = deque(maxlen=MAX_POINTS)
@@ -130,6 +139,31 @@ def parse_serial_line(line: str) -> Optional[Tuple[float, float, float, Optional
         intensity = derive_intensity(distance, frequency)
         return angle, distance, intensity, frequency
     except ValueError:
+        return None
+
+
+def parse_ingest_point(item) -> Optional[Tuple[float, float, float, Optional[float]]]:
+    if not isinstance(item, dict):
+        return None
+
+    if "angle" not in item or "distance" not in item:
+        return None
+
+    try:
+        angle = normalize_angle(float(item.get("angle")))
+        distance = max(0.0, float(item.get("distance")))
+
+        frequency_raw = item.get("frequency")
+        frequency = float(frequency_raw) if frequency_raw is not None and frequency_raw != "" else None
+
+        intensity_raw = item.get("intensity")
+        if intensity_raw is None or intensity_raw == "":
+            intensity = derive_intensity(distance, frequency)
+        else:
+            intensity = clamp(float(intensity_raw), 0.0, 1.0)
+
+        return angle, distance, intensity, frequency
+    except (TypeError, ValueError):
         return None
 
 
@@ -256,10 +290,16 @@ def index() -> str:
 
 @app.route("/data")
 def data():
-    if DISABLE_READER_THREAD:
-        runtime_state["mode"] = "simulation"
-        runtime_state["last_error"] = None
-        seed_serverless_point()
+    if DISABLE_READER_THREAD and SERVERLESS_AUTOSIM:
+        with points_lock:
+            snapshot_len = len(radar_points)
+            latest_ts = float(latest_point.get("ts", 0.0))
+
+        has_fresh_point = snapshot_len > 0 and (time.time() - latest_ts) <= SERVERLESS_FRESH_SECONDS
+        if not has_fresh_point:
+            runtime_state["mode"] = "simulation"
+            runtime_state["last_error"] = None
+            seed_serverless_point()
 
     with points_lock:
         snapshot = list(radar_points)
@@ -276,6 +316,50 @@ def data():
             "lastError": runtime_state.get("last_error"),
             "serverTime": time.time(),
             "maxDistance": RADAR_MAX_DISTANCE,
+        }
+    )
+
+
+@app.route("/ingest", methods=["POST"])
+def ingest():
+    if INGEST_TOKEN:
+        token = request.headers.get("X-Radar-Token", "").strip()
+        if token != INGEST_TOKEN:
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"ok": False, "error": "invalid_json"}), 400
+
+    if isinstance(payload, dict) and isinstance(payload.get("points"), list):
+        raw_points = payload.get("points")
+    else:
+        raw_points = [payload]
+
+    accepted = 0
+    dropped = 0
+
+    for raw in raw_points[:MAX_INGEST_BATCH]:
+        parsed = parse_ingest_point(raw)
+        if parsed is None:
+            dropped += 1
+            continue
+        add_point(*parsed)
+        accepted += 1
+
+    if accepted == 0:
+        return jsonify({"ok": False, "error": "no_valid_points", "dropped": dropped}), 400
+
+    runtime_state["mode"] = "ingest"
+    runtime_state["last_error"] = None
+
+    return jsonify(
+        {
+            "ok": True,
+            "accepted": accepted,
+            "dropped": dropped,
+            "bufferSize": len(radar_points),
+            "mode": runtime_state.get("mode", "unknown"),
         }
     )
 
@@ -324,6 +408,8 @@ def health():
             "bufferSize": len(radar_points),
             "serialConfigured": bool(SERIAL_PORT),
             "readerThreadEnabled": not DISABLE_READER_THREAD,
+            "ingestTokenRequired": bool(INGEST_TOKEN),
+            "serverlessAutoSimulation": SERVERLESS_AUTOSIM,
         }
     )
 
@@ -332,7 +418,7 @@ def health():
 if not DISABLE_READER_THREAD:
     start_reader_thread()
 else:
-    runtime_state["mode"] = "simulation"
+    runtime_state["mode"] = "simulation" if SERVERLESS_AUTOSIM else "idle"
     runtime_state["last_error"] = None
 
 

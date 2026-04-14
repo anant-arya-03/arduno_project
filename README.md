@@ -5,6 +5,7 @@ A full-stack radar dashboard built with Flask + Three.js.
 ## Features
 
 - Real-time serial ingest from Arduino (`angle,distance` or `angle,distance,frequency`)
+- Optional cloud ingest endpoint (`/ingest`) for serial bridge uploads
 - Threaded reader with rolling buffer (default 500 points)
 - 3D radar visualization with sweep beam, pulsing waves, glow points, and heatmap colors
 - CSV snapshot export from `/save`
@@ -17,6 +18,7 @@ A full-stack radar dashboard built with Flask + Three.js.
 - `templates/index.html` - dashboard layout + UI panel
 - `static/script.js` - Three.js rendering and animation loop
 - `radar.py` - serial/simulation stream inspector utility
+- `arduino_bridge.py` - serial-to-HTTP bridge (Arduino -> cloud `/ingest`)
 - `requirements.txt` - Python dependencies
 - `render.yaml` - Render Blueprint deployment config
 - `vercel.json` - Vercel routing and build config
@@ -83,10 +85,41 @@ python radar.py --simulation
 python radar.py --serial-port COM4 --baud 9600
 ```
 
+## Connect Arduino IDE Code
+
+Your Arduino sketch should print one line per sample in this exact format:
+
+- `angle,distance`
+- `angle,distance,frequency`
+
+### Connect Arduino to Local App
+
+```powershell
+$env:SERIAL_PORT = "COM4"
+$env:SERIAL_BAUD = "9600"
+$env:RADAR_SIMULATION = "false"
+python radar_web.py
+```
+
+### Connect Arduino to Deployed Vercel App
+
+Because Vercel cannot read USB serial directly, use the included bridge script on your PC:
+
+1. In Vercel Project Settings -> Environment Variables, set:
+	- `RADAR_INGEST_TOKEN` to a secret value (for example `myRadarToken123`)
+2. Run bridge from your computer (where Arduino is connected):
+
+```powershell
+python arduino_bridge.py --serial-port COM4 --baud 9600 --endpoint https://radarproject.vercel.app/ingest --token myRadarToken123
+```
+
+Keep this bridge process running while viewing the dashboard.
+
 ## API Endpoints
 
 - `GET /` - Radar dashboard
 - `GET /data` - Live JSON telemetry
+- `POST /ingest` - Push one or many points from external bridge/device
 - `GET or POST /save` - Download CSV snapshot
 - `GET /health` - Health and mode status
 
@@ -117,6 +150,8 @@ Vercel deployment uses serverless mode, so the app automatically enables:
 
 - `RADAR_SIMULATION=true`
 - `RADAR_DISABLE_READER_THREAD=true`
+
+If you use cloud ingest from Arduino bridge, keep `RADAR_SERVERLESS_AUTOSIM=true` to auto-fill only when no recent live point exists.
 
 ### Option A: Vercel Dashboard
 
