@@ -1,10 +1,18 @@
 (function () {
+    var errorValue = document.getElementById("errorValue");
+
     if (typeof THREE === "undefined") {
+        if (errorValue) {
+            errorValue.textContent = "3D engine failed to load. Please refresh and check network access.";
+        }
         return;
     }
 
     var container = document.getElementById("scene-container");
     if (!container) {
+        if (errorValue) {
+            errorValue.textContent = "Scene container missing.";
+        }
         return;
     }
 
@@ -12,7 +20,6 @@
     var distanceValue = document.getElementById("distanceValue");
     var modeValue = document.getElementById("modeValue");
     var countValue = document.getElementById("countValue");
-    var errorValue = document.getElementById("errorValue");
     var saveButton = document.getElementById("saveButton");
 
     var config = {
@@ -46,6 +53,13 @@
         renderer.outputColorSpace = THREE.SRGBColorSpace;
     }
     container.appendChild(renderer.domElement);
+
+    if (typeof THREE.OrbitControls !== "function") {
+        if (errorValue) {
+            errorValue.textContent = "Orbit controls failed to load from CDN.";
+        }
+        return;
+    }
 
     var controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
