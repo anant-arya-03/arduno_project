@@ -26,7 +26,7 @@
         dataEndpoint: "/data",
         saveEndpoint: "/save",
         pollIntervalMs: 130,
-        pointLifetimeMs: 3200,
+        pointLifetimeMs: 2600,
         wavePeriodMs: 2100,
         maxVisiblePoints: 220,
         angleMergeDeg: 2,
@@ -192,6 +192,44 @@
     var pointGroup = new THREE.Group();
     root.add(pointGroup);
 
+    var currentMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(3.3, 16, 16),
+        new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0xffffff,
+            emissiveIntensity: 1.25,
+            roughness: 0.2,
+            metalness: 0.15,
+            transparent: true,
+            opacity: 0.92
+        })
+    );
+    currentMarker.visible = false;
+    currentMarker.position.set(0, 1.5, 0);
+    root.add(currentMarker);
+
+    var currentHalo = new THREE.Mesh(
+        new THREE.RingGeometry(3.8, 4.6, 48),
+        new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.38,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        })
+    );
+    currentHalo.rotation.x = -Math.PI / 2;
+    currentHalo.visible = false;
+    root.add(currentHalo);
+
+    var currentTarget = {
+        active: false,
+        distance: 0,
+        angleDeg: 0,
+        y: 2,
+        color: new THREE.Color(0xffffff)
+    };
+
     var pointMap = new Map();
 
     function heatColor(distance) {
@@ -309,6 +347,12 @@
     }
 
     function syncPoints(points) {
+        var nowSec = Date.now() / 1000;
+        var maxAgeSec = config.pointLifetimeMs / 1000 + 0.1;
+        points = points.filter(function (point) {
+            return (nowSec - (Number(point.ts) || 0)) <= maxAgeSec;
+        });
+
         if (points.length > config.maxVisiblePoints * 6) {
             points = points.slice(points.length - config.maxVisiblePoints * 6);
         }
@@ -350,6 +394,8 @@
     function updateHud(current, mode, count, lastError) {
         var angle = Number(current && current.angle) || 0;
         var distance = Number(current && current.distance) || 0;
+        var intensity = Math.min(1, Math.max(0, Number(current && current.intensity) || 0));
+        var frequency = Number(current && current.frequency);
 
         setUiText(angleValue, angle.toFixed(1) + " deg");
         setUiText(distanceValue, distance.toFixed(1) + " cm");
@@ -363,6 +409,19 @@
         }
 
         sweepPivot.rotation.y = THREE.MathUtils.degToRad(angle);
+
+        if (distance > 0.01) {
+            var yFromIntensity = 2 + intensity * 18;
+            var yFromFrequency = Number.isFinite(frequency) ? Math.min(6, frequency * 0.08) : 0;
+
+            currentTarget.active = true;
+            currentTarget.distance = distance;
+            currentTarget.angleDeg = angle;
+            currentTarget.y = yFromIntensity + yFromFrequency;
+            currentTarget.color = heatColor(distance);
+        } else {
+            currentTarget.active = false;
+        }
     }
 
     var isFetching = false;
@@ -428,6 +487,29 @@
 
         for (var j = 0; j < expired.length; j += 1) {
             removePoint(expired[j]);
+        }
+
+        if (currentTarget.active) {
+            var targetRad = THREE.MathUtils.degToRad(currentTarget.angleDeg);
+            var tx = currentTarget.distance * Math.cos(targetRad);
+            var tz = currentTarget.distance * Math.sin(targetRad);
+            var pulse = 1.0 + 0.14 * Math.sin(nowMs / 120);
+
+            currentMarker.visible = true;
+            currentMarker.position.set(tx, currentTarget.y + 0.2, tz);
+            currentMarker.scale.setScalar(pulse);
+            currentMarker.material.color.copy(currentTarget.color);
+            currentMarker.material.emissive.copy(currentTarget.color);
+            currentMarker.material.emissiveIntensity = 1.35;
+
+            currentHalo.visible = true;
+            currentHalo.position.set(tx, 0.28, tz);
+            currentHalo.scale.set(0.9 + pulse * 0.16, 0.9 + pulse * 0.16, 1);
+            currentHalo.material.color.copy(currentTarget.color);
+            currentHalo.material.opacity = 0.18 + 0.18 * (0.5 + 0.5 * Math.sin(nowMs / 160));
+        } else {
+            currentMarker.visible = false;
+            currentHalo.visible = false;
         }
 
         renderer.render(scene, camera);

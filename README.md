@@ -120,7 +120,7 @@ Keep this bridge process running while viewing the dashboard.
 For HC-SR04 style sensors mounted on a servo, use filtered bridge settings:
 
 ```powershell
-python arduino_bridge.py --serial-port COM3 --baud 9600 --endpoint https://radarproject.vercel.app/ingest --batch-size 1 --flush-interval 0.05 --servo-mode auto --median-window 5 --smooth-alpha 0.35 --max-step-change 18 --angle-bin-deg 2 --distance-min 3 --distance-max 250
+python arduino_bridge.py --showcase --serial-port COM3 --baud 9600 --endpoint https://radarproject.vercel.app/ingest
 ```
 
 If left/right appears mirrored, add:
@@ -133,6 +133,18 @@ If the sweep is rotated, add for calibration:
 
 ```powershell
 --angle-offset -90
+```
+
+If your servo center points to the right side of the radar, use:
+
+```powershell
+--servo-mode raw
+```
+
+If your servo center points to the radar center line already and you want a centered arc mapping, use:
+
+```powershell
+--servo-mode centered
 ```
 
 Important: close Arduino Serial Monitor before running the bridge, otherwise COM port locks can cause stale or inaccurate updates.
@@ -173,7 +185,7 @@ Vercel deployment uses serverless mode, so the app automatically enables:
 - `RADAR_SIMULATION=true`
 - `RADAR_DISABLE_READER_THREAD=true`
 
-If you use cloud ingest from Arduino bridge, keep `RADAR_SERVERLESS_AUTOSIM=true` to auto-fill only when no recent live point exists.
+For real hardware demos, keep `RADAR_SERVERLESS_AUTOSIM=false` so only real sensor points are displayed.
 
 ### Option A: Vercel Dashboard
 

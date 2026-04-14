@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         help="Generate synthetic points instead of reading serial",
     )
     parser.add_argument(
+        "--showcase",
+        action="store_true",
+        default=env_flag("RADAR_BRIDGE_SHOWCASE", False),
+        help="Apply low-latency showcase presets for hand-detection demos.",
+    )
+    parser.add_argument(
         "--servo-mode",
         choices=["auto", "raw", "centered"],
         default=os.getenv("RADAR_BRIDGE_SERVO_MODE", "auto").strip().lower() or "auto",
@@ -151,10 +157,34 @@ def parse_args() -> argparse.Namespace:
         help="EMA smoothing factor after median filter (0..1).",
     )
     parser.add_argument(
+        "--fast-alpha",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_FAST_ALPHA", "0.78")),
+        help="Faster EMA factor when object moves closer (0..1).",
+    )
+    parser.add_argument(
+        "--fast-near-distance",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_FAST_NEAR_DISTANCE", "90")),
+        help="Enable fast-alpha when target is closer than this distance (cm).",
+    )
+    parser.add_argument(
         "--max-step-change",
         type=float,
         default=float(os.getenv("RADAR_BRIDGE_MAX_STEP_CHANGE", "18")),
         help="Maximum allowed distance change per sample for a bin (cm).",
+    )
+    parser.add_argument(
+        "--jump-reject-cm",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_JUMP_REJECT_CM", "55")),
+        help="Reject improbable one-sample jumps larger than this value (cm).",
+    )
+    parser.add_argument(
+        "--bin-timeout-sec",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_BIN_TIMEOUT_SEC", "2.0")),
+        help="Reset a bin if no update arrives for this duration (seconds).",
     )
     parser.add_argument(
         "--verbose",
@@ -178,10 +208,15 @@ class PointCalibrator:
 
         self.median_window = max(1, int(args.median_window))
         self.smooth_alpha = clamp(float(args.smooth_alpha), 0.0, 1.0)
+        self.fast_alpha = clamp(float(args.fast_alpha), 0.0, 1.0)
+        self.fast_near_distance = max(self.distance_min, float(args.fast_near_distance))
         self.max_step_change = max(0.0, float(args.max_step_change))
+        self.jump_reject_cm = max(0.0, float(args.jump_reject_cm))
+        self.bin_timeout_sec = max(0.0, float(args.bin_timeout_sec))
 
         self._history: Dict[int, Deque[float]] = defaultdict(lambda: deque(maxlen=self.median_window))
         self._smoothed: Dict[int, float] = {}
+        self._last_seen_ts: Dict[int, float] = {}
 
         self._auto_min_angle = 9999.0
         self._auto_max_angle = -9999.0
@@ -192,9 +227,9 @@ class PointCalibrator:
             return self.servo_mode
         if self._auto_samples == 0:
             return "auto"
-        # Most servo-based ultrasonic scans are 0..180 and should be centered.
+        # Most servo-based ultrasonic scans are 0..180 and should stay raw for front-arc mapping.
         if self._auto_min_angle >= -5.0 and self._auto_max_angle <= 185.0:
-            return "centered"
+            return "raw"
         return "raw"
 
     def _transform_angle(self, angle: float) -> float:
@@ -223,6 +258,7 @@ class PointCalibrator:
     def apply(self, point: Dict[str, float]) -> Optional[Dict[str, float]]:
         raw_angle = float(point.get("angle", 0.0))
         raw_distance = float(point.get("distance", 0.0))
+        now = time.time()
 
         angle = self._transform_angle(raw_angle)
         distance = self._transform_distance(raw_distance)
@@ -231,6 +267,12 @@ class PointCalibrator:
 
         bin_key = int(round(angle / self.angle_bin_deg))
         history = self._history[bin_key]
+
+        last_seen = self._last_seen_ts.get(bin_key)
+        if last_seen is not None and self.bin_timeout_sec > 0 and (now - last_seen) > self.bin_timeout_sec:
+            history.clear()
+            self._smoothed.pop(bin_key, None)
+
         history.append(distance)
 
         median_distance = float(statistics.median(history))
@@ -239,7 +281,20 @@ class PointCalibrator:
         if previous is None:
             filtered = median_distance
         else:
-            filtered = previous + self.smooth_alpha * (median_distance - previous)
+            candidate = median_distance
+
+            if self.jump_reject_cm > 0 and abs(candidate - previous) > self.jump_reject_cm:
+                if candidate > previous:
+                    # Upward spikes are usually bad ultrasonic echoes.
+                    candidate = previous
+                else:
+                    candidate = previous - self.jump_reject_cm
+
+            alpha = self.smooth_alpha
+            if candidate < previous and candidate <= self.fast_near_distance:
+                alpha = self.fast_alpha
+
+            filtered = previous + alpha * (candidate - previous)
             if self.max_step_change > 0:
                 delta = filtered - previous
                 if abs(delta) > self.max_step_change:
@@ -247,6 +302,7 @@ class PointCalibrator:
 
         filtered = clamp(filtered, self.distance_min, self.distance_max)
         self._smoothed[bin_key] = filtered
+        self._last_seen_ts[bin_key] = now
 
         out = dict(point)
         out["angle"] = round(angle, 2)
@@ -334,6 +390,21 @@ def post_points(
 
 def main() -> int:
     args = parse_args()
+
+    if args.showcase:
+        args.batch_size = 1
+        args.flush_interval = min(args.flush_interval, 0.05)
+        args.angle_bin_deg = 2.0
+        args.median_window = 5
+        args.smooth_alpha = 0.28
+        args.fast_alpha = 0.82
+        args.fast_near_distance = 95.0
+        args.max_step_change = 20.0
+        args.jump_reject_cm = 55.0
+        args.bin_timeout_sec = 2.0
+        if args.servo_mode == "auto":
+            args.servo_mode = "raw"
+
     batch_size = max(1, args.batch_size)
     flush_interval = max(0.05, args.flush_interval)
     calibrator = PointCalibrator(args)
@@ -356,7 +427,9 @@ def main() -> int:
         + f"servoMode={args.servo_mode} "
         + f"bin={calibrator.angle_bin_deg}deg "
         + f"median={calibrator.median_window} "
-        + f"alpha={calibrator.smooth_alpha} "
+        + f"alpha={calibrator.smooth_alpha}/{calibrator.fast_alpha} "
+        + f"fastNear<={calibrator.fast_near_distance}cm "
+        + f"jumpReject={calibrator.jump_reject_cm}cm "
         + f"distanceRange={calibrator.distance_min}-{calibrator.distance_max}cm"
     )
 
@@ -400,7 +473,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\nBridge stopped.")
         if buffer:
-            post_points(args.endpoint, args.token, buffer, args.http_timeout)
+            post_points(args.endpoint, args.token, buffer, args.http_timeout, args.verbose)
         return 0
     except (RuntimeError, SerialException) as exc:
         print(f"Bridge error: {exc}")
