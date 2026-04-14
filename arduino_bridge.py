@@ -12,8 +12,10 @@ import argparse
 import math
 import os
 import random
+import statistics
 import time
-from typing import Dict, Generator, Iterable, List, Optional
+from collections import defaultdict, deque
+from typing import Deque, Dict, Generator, Iterable, List, Optional
 
 import requests
 
@@ -23,6 +25,17 @@ try:
 except Exception:  # pragma: no cover
     serial = None
     SerialException = Exception
+
+
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,7 +90,168 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Generate synthetic points instead of reading serial",
     )
+    parser.add_argument(
+        "--servo-mode",
+        choices=["auto", "raw", "centered"],
+        default=os.getenv("RADAR_BRIDGE_SERVO_MODE", "auto").strip().lower() or "auto",
+        help="Servo angle interpretation. 'centered' maps 0-180 to -90..90.",
+    )
+    parser.add_argument(
+        "--invert-angle",
+        action="store_true",
+        default=env_flag("RADAR_BRIDGE_INVERT_ANGLE", False),
+        help="Invert angle direction after servo mode transform.",
+    )
+    parser.add_argument(
+        "--angle-offset",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_ANGLE_OFFSET", "0")),
+        help="Angle offset in degrees applied after transform.",
+    )
+    parser.add_argument(
+        "--angle-bin-deg",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_ANGLE_BIN_DEG", "2")),
+        help="Angle bin size (deg) used for per-angle smoothing.",
+    )
+    parser.add_argument(
+        "--distance-min",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_DISTANCE_MIN", "3")),
+        help="Reject distances below this threshold (cm).",
+    )
+    parser.add_argument(
+        "--distance-max",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_DISTANCE_MAX", os.getenv("RADAR_MAX_DISTANCE", "250"))),
+        help="Reject distances above this threshold (cm).",
+    )
+    parser.add_argument(
+        "--distance-scale",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_DISTANCE_SCALE", "1.0")),
+        help="Multiply incoming distance by this scale before filtering.",
+    )
+    parser.add_argument(
+        "--distance-offset",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_DISTANCE_OFFSET", "0")),
+        help="Add this offset (cm) to incoming distance before filtering.",
+    )
+    parser.add_argument(
+        "--median-window",
+        type=int,
+        default=int(os.getenv("RADAR_BRIDGE_MEDIAN_WINDOW", "5")),
+        help="Median filter window size per angle bin.",
+    )
+    parser.add_argument(
+        "--smooth-alpha",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_SMOOTH_ALPHA", "0.35")),
+        help="EMA smoothing factor after median filter (0..1).",
+    )
+    parser.add_argument(
+        "--max-step-change",
+        type=float,
+        default=float(os.getenv("RADAR_BRIDGE_MAX_STEP_CHANGE", "18")),
+        help="Maximum allowed distance change per sample for a bin (cm).",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed per-post logs.",
+    )
     return parser.parse_args()
+
+
+class PointCalibrator:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.servo_mode = args.servo_mode
+        self.invert_angle = bool(args.invert_angle)
+        self.angle_offset = float(args.angle_offset)
+        self.angle_bin_deg = max(0.5, float(args.angle_bin_deg))
+
+        self.distance_min = max(0.0, float(args.distance_min))
+        self.distance_max = max(self.distance_min + 1.0, float(args.distance_max))
+        self.distance_scale = float(args.distance_scale)
+        self.distance_offset = float(args.distance_offset)
+
+        self.median_window = max(1, int(args.median_window))
+        self.smooth_alpha = clamp(float(args.smooth_alpha), 0.0, 1.0)
+        self.max_step_change = max(0.0, float(args.max_step_change))
+
+        self._history: Dict[int, Deque[float]] = defaultdict(lambda: deque(maxlen=self.median_window))
+        self._smoothed: Dict[int, float] = {}
+
+        self._auto_min_angle = 9999.0
+        self._auto_max_angle = -9999.0
+        self._auto_samples = 0
+
+    def current_servo_mode(self) -> str:
+        if self.servo_mode != "auto":
+            return self.servo_mode
+        if self._auto_samples == 0:
+            return "auto"
+        # Most servo-based ultrasonic scans are 0..180 and should be centered.
+        if self._auto_min_angle >= -5.0 and self._auto_max_angle <= 185.0:
+            return "centered"
+        return "raw"
+
+    def _transform_angle(self, angle: float) -> float:
+        self._auto_samples += 1
+        self._auto_min_angle = min(self._auto_min_angle, angle)
+        self._auto_max_angle = max(self._auto_max_angle, angle)
+
+        mode = self.current_servo_mode()
+        transformed = angle
+
+        if mode == "centered":
+            transformed = transformed - 90.0
+
+        if self.invert_angle:
+            transformed = -transformed
+
+        transformed = (transformed + self.angle_offset) % 360.0
+        return transformed
+
+    def _transform_distance(self, distance: float) -> Optional[float]:
+        corrected = (distance * self.distance_scale) + self.distance_offset
+        if corrected < self.distance_min or corrected > self.distance_max:
+            return None
+        return corrected
+
+    def apply(self, point: Dict[str, float]) -> Optional[Dict[str, float]]:
+        raw_angle = float(point.get("angle", 0.0))
+        raw_distance = float(point.get("distance", 0.0))
+
+        angle = self._transform_angle(raw_angle)
+        distance = self._transform_distance(raw_distance)
+        if distance is None:
+            return None
+
+        bin_key = int(round(angle / self.angle_bin_deg))
+        history = self._history[bin_key]
+        history.append(distance)
+
+        median_distance = float(statistics.median(history))
+        previous = self._smoothed.get(bin_key)
+
+        if previous is None:
+            filtered = median_distance
+        else:
+            filtered = previous + self.smooth_alpha * (median_distance - previous)
+            if self.max_step_change > 0:
+                delta = filtered - previous
+                if abs(delta) > self.max_step_change:
+                    filtered = previous + (self.max_step_change if delta > 0 else -self.max_step_change)
+
+        filtered = clamp(filtered, self.distance_min, self.distance_max)
+        self._smoothed[bin_key] = filtered
+
+        out = dict(point)
+        out["angle"] = round(angle, 2)
+        out["distance"] = round(filtered, 2)
+        return out
 
 
 def parse_serial_point(line: str) -> Optional[Dict[str, float]]:
@@ -127,7 +301,13 @@ def simulation_lines() -> Generator[str, None, None]:
         time.sleep(0.05)
 
 
-def post_points(endpoint: str, token: str, points: List[Dict[str, float]], http_timeout: float) -> bool:
+def post_points(
+    endpoint: str,
+    token: str,
+    points: List[Dict[str, float]],
+    http_timeout: float,
+    verbose: bool,
+) -> bool:
     headers = {}
     if token:
         headers["X-Radar-Token"] = token
@@ -140,8 +320,9 @@ def post_points(endpoint: str, token: str, points: List[Dict[str, float]], http_
             timeout=http_timeout,
         )
         if response.ok:
-            payload = response.json()
-            print(f"POST ok accepted={payload.get('accepted')} dropped={payload.get('dropped')}")
+            if verbose:
+                payload = response.json()
+                print(f"POST ok accepted={payload.get('accepted')} dropped={payload.get('dropped')}")
             return True
 
         print(f"POST failed status={response.status_code} body={response.text[:160]}")
@@ -155,21 +336,37 @@ def main() -> int:
     args = parse_args()
     batch_size = max(1, args.batch_size)
     flush_interval = max(0.05, args.flush_interval)
+    calibrator = PointCalibrator(args)
 
     source = simulation_lines() if args.simulation else serial_lines(args.serial_port, args.baud, args.timeout)
 
     buffer: List[Dict[str, float]] = []
     last_flush = time.time()
+    last_stat_log = time.time()
+    total_points_sent = 0
+    total_batches_sent = 0
 
     print(f"Sending to {args.endpoint}")
     if args.token:
         print("Token auth: enabled")
     else:
         print("Token auth: disabled")
+    print(
+        "Filter settings: "
+        + f"servoMode={args.servo_mode} "
+        + f"bin={calibrator.angle_bin_deg}deg "
+        + f"median={calibrator.median_window} "
+        + f"alpha={calibrator.smooth_alpha} "
+        + f"distanceRange={calibrator.distance_min}-{calibrator.distance_max}cm"
+    )
 
     try:
         for raw_line in source:
             point = parse_serial_point(raw_line)
+            if point is None:
+                continue
+
+            point = calibrator.apply(point)
             if point is None:
                 continue
 
@@ -180,9 +377,20 @@ def main() -> int:
             if not should_flush:
                 continue
 
-            if post_points(args.endpoint, args.token, buffer, args.http_timeout):
+            if post_points(args.endpoint, args.token, buffer, args.http_timeout, args.verbose):
+                total_points_sent += len(buffer)
+                total_batches_sent += 1
                 buffer.clear()
                 last_flush = now
+
+                if not args.verbose and (now - last_stat_log) >= 2.0:
+                    print(
+                        "stream ok "
+                        + f"batches={total_batches_sent} "
+                        + f"points={total_points_sent} "
+                        + f"servoMode={calibrator.current_servo_mode()}"
+                    )
+                    last_stat_log = now
             else:
                 time.sleep(0.5)
                 if len(buffer) > batch_size * 30:

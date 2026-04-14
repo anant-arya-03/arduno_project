@@ -115,6 +115,28 @@ python arduino_bridge.py --serial-port COM4 --baud 9600 --endpoint https://radar
 
 Keep this bridge process running while viewing the dashboard.
 
+### Accuracy Tuning For Ultrasonic + Servo
+
+For HC-SR04 style sensors mounted on a servo, use filtered bridge settings:
+
+```powershell
+python arduino_bridge.py --serial-port COM3 --baud 9600 --endpoint https://radarproject.vercel.app/ingest --batch-size 1 --flush-interval 0.05 --servo-mode auto --median-window 5 --smooth-alpha 0.35 --max-step-change 18 --angle-bin-deg 2 --distance-min 3 --distance-max 250
+```
+
+If left/right appears mirrored, add:
+
+```powershell
+--invert-angle
+```
+
+If the sweep is rotated, add for calibration:
+
+```powershell
+--angle-offset -90
+```
+
+Important: close Arduino Serial Monitor before running the bridge, otherwise COM port locks can cause stale or inaccurate updates.
+
 ## API Endpoints
 
 - `GET /` - Radar dashboard

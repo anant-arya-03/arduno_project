@@ -25,9 +25,11 @@
     var config = {
         dataEndpoint: "/data",
         saveEndpoint: "/save",
-        pollIntervalMs: 140,
-        pointLifetimeMs: 9000,
+        pollIntervalMs: 130,
+        pointLifetimeMs: 3200,
         wavePeriodMs: 2100,
+        maxVisiblePoints: 220,
+        angleMergeDeg: 2,
         maxDistance: Number(window.RADAR_CONFIG && window.RADAR_CONFIG.maxDistance) || 250
     };
 
@@ -185,8 +187,8 @@
     createWave(config.wavePeriodMs / 3);
     createWave((config.wavePeriodMs * 2) / 3);
 
-    var pointGeometry = new THREE.SphereGeometry(2.2, 18, 18);
-    var haloGeometry = new THREE.SphereGeometry(3.9, 12, 12);
+    var pointGeometry = new THREE.SphereGeometry(1.5, 14, 14);
+    var haloGeometry = new THREE.SphereGeometry(2.8, 10, 10);
     var pointGroup = new THREE.Group();
     root.add(pointGroup);
 
@@ -208,6 +210,33 @@
         var angle = Number(point.angle || 0).toFixed(2);
         var distance = Number(point.distance || 0).toFixed(2);
         return ts + ":" + angle + ":" + distance;
+    }
+
+    function mergePointsByAngle(points) {
+        var byBin = new Map();
+        var binSize = Math.max(0.5, Number(config.angleMergeDeg) || 2);
+
+        for (var i = 0; i < points.length; i += 1) {
+            var point = points[i];
+            var angle = Number(point.angle) || 0;
+            var key = String(Math.round(angle / binSize));
+            var prev = byBin.get(key);
+
+            if (!prev || (Number(point.ts) || 0) >= (Number(prev.ts) || 0)) {
+                byBin.set(key, point);
+            }
+        }
+
+        var merged = Array.from(byBin.values());
+        merged.sort(function (a, b) {
+            return (Number(a.ts) || 0) - (Number(b.ts) || 0);
+        });
+
+        if (merged.length > config.maxVisiblePoints) {
+            merged = merged.slice(merged.length - config.maxVisiblePoints);
+        }
+
+        return merged;
     }
 
     function createPointEntry(point) {
@@ -257,8 +286,8 @@
         var x = distance * Math.cos(angleRad);
         var z = distance * Math.sin(angleRad);
 
-        var yFromIntensity = 3 + intensity * 30;
-        var yFromFrequency = Number.isFinite(frequency) ? Math.min(22, frequency * 0.28) : 0;
+        var yFromIntensity = 2 + intensity * 18;
+        var yFromFrequency = Number.isFinite(frequency) ? Math.min(6, frequency * 0.08) : 0;
 
         entry.mesh.position.set(x, yFromIntensity + yFromFrequency, z);
 
@@ -280,6 +309,12 @@
     }
 
     function syncPoints(points) {
+        if (points.length > config.maxVisiblePoints * 6) {
+            points = points.slice(points.length - config.maxVisiblePoints * 6);
+        }
+
+        points = mergePointsByAngle(points);
+
         var seen = new Set();
 
         for (var i = 0; i < points.length; i += 1) {
@@ -387,7 +422,7 @@
             entry.material.emissiveIntensity = 0.35 + 1.2 * life;
             entry.haloMaterial.opacity = Math.max(0.03, life * 0.24);
 
-            var pulse = 0.9 + 0.14 * Math.sin(nowMs / 240 + entry.pulseOffset);
+            var pulse = 0.96 + 0.08 * Math.sin(nowMs / 250 + entry.pulseOffset);
             entry.mesh.scale.setScalar(pulse);
         });
 
