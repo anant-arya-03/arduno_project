@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>3D Radar Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-deep: #020706;
+            --bg-mid: #041613;
+            --bg-glow: #0c2f26;
+            --accent: #65ffb0;
+            --accent-soft: #2fd88a;
+            --warn: #ffd451;
+            --near: #ff584f;
+            --text-main: #d5ffe8;
+            --text-dim: #88b6a0;
+            --panel: rgba(7, 26, 22, 0.78);
+            --panel-border: rgba(123, 255, 191, 0.3);
+            --button: #0d382f;
+            --button-hover: #165446;
+            --ring: rgba(95, 255, 177, 0.18);
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            font-family: "Rajdhani", "Segoe UI", sans-serif;
+            color: var(--text-main);
+            background:
+                radial-gradient(1200px 700px at 20% -20%, rgba(79, 255, 170, 0.14), transparent 60%),
+                radial-gradient(900px 700px at 110% 20%, rgba(115, 255, 210, 0.12), transparent 65%),
+                linear-gradient(160deg, var(--bg-deep) 0%, var(--bg-mid) 60%, var(--bg-glow) 100%);
+        }
+
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0.2;
+            background-image:
+                linear-gradient(rgba(91, 232, 158, 0.07) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(91, 232, 158, 0.07) 1px, transparent 1px);
+            background-size: 46px 46px;
+        }
+
+        .app-shell {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 320px;
+            gap: 12px;
+            padding: 12px;
+        }
+
+        .scene-wrap {
+            position: relative;
+            border-radius: 18px;
+            overflow: hidden;
+            border: 1px solid var(--panel-border);
+            box-shadow:
+                inset 0 0 45px rgba(106, 255, 188, 0.14),
+                0 16px 40px rgba(0, 0, 0, 0.35);
+            background: rgba(4, 20, 17, 0.55);
+            min-height: 300px;
+        }
+
+        #scene-container {
+            position: absolute;
+            inset: 0;
+        }
+
+        .scanlines {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            mix-blend-mode: screen;
+            opacity: 0.16;
+            background: repeating-linear-gradient(
+                180deg,
+                transparent,
+                transparent 3px,
+                rgba(121, 255, 189, 0.2) 4px,
+                transparent 5px
+            );
+            animation: scan-drift 7s linear infinite;
+        }
+
+        .hud-title {
+            position: absolute;
+            top: 16px;
+            left: 20px;
+            letter-spacing: 0.16em;
+            font-family: "Orbitron", sans-serif;
+            font-size: 0.9rem;
+            color: rgba(170, 255, 210, 0.9);
+            text-transform: uppercase;
+            text-shadow: 0 0 12px rgba(116, 255, 188, 0.7);
+            pointer-events: none;
+        }
+
+        .panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            border-radius: 18px;
+            border: 1px solid var(--panel-border);
+            background: var(--panel);
+            backdrop-filter: blur(7px);
+            padding: 14px;
+            box-shadow:
+                inset 0 0 24px rgba(127, 255, 196, 0.1),
+                0 16px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .panel h1 {
+            margin: 0;
+            font-family: "Orbitron", sans-serif;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 1.1rem;
+            color: #beffd8;
+        }
+
+        .subtle {
+            margin: 0;
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        .metric {
+            border: 1px solid rgba(113, 255, 187, 0.25);
+            border-radius: 14px;
+            background: rgba(5, 23, 18, 0.64);
+            padding: 10px 12px;
+        }
+
+        .metric-label {
+            display: block;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            font-size: 0.78rem;
+            margin-bottom: 4px;
+        }
+
+        .metric-value {
+            font-family: "Orbitron", sans-serif;
+            font-size: 1.34rem;
+            font-weight: 700;
+            color: var(--accent);
+            text-shadow: 0 0 14px rgba(101, 255, 176, 0.35);
+        }
+
+        .status-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .status-chip {
+            border-radius: 999px;
+            border: 1px solid rgba(129, 255, 201, 0.35);
+            padding: 6px 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-size: 0.73rem;
+            color: #a8ffd1;
+            text-align: center;
+            background: rgba(7, 26, 20, 0.6);
+        }
+
+        button {
+            border: 1px solid rgba(152, 255, 209, 0.45);
+            background: linear-gradient(145deg, var(--button), rgba(18, 73, 61, 0.9));
+            color: #dcffe9;
+            min-height: 50px;
+            border-radius: 12px;
+            font-family: "Orbitron", sans-serif;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            font-size: 0.82rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+            touch-action: manipulation;
+        }
+
+        button:hover,
+        button:focus-visible {
+            transform: translateY(-1px) scale(1.01);
+            background: linear-gradient(145deg, var(--button-hover), rgba(26, 90, 76, 0.95));
+            box-shadow: 0 8px 20px rgba(53, 198, 130, 0.25);
+            outline: none;
+        }
+
+        .legend {
+            display: grid;
+            gap: 7px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            color: var(--text-dim);
+            font-size: 0.88rem;
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            box-shadow: 0 0 10px currentColor;
+        }
+
+        .dot-near {
+            color: var(--near);
+            background: var(--near);
+        }
+
+        .dot-mid {
+            color: var(--warn);
+            background: var(--warn);
+        }
+
+        .dot-far {
+            color: var(--accent);
+            background: var(--accent);
+        }
+
+        .error {
+            min-height: 1.2rem;
+            color: #ff9792;
+            font-size: 0.84rem;
+        }
+
+        @keyframes scan-drift {
+            0% {
+                transform: translateY(-18px);
+            }
+            100% {
+                transform: translateY(18px);
+            }
+        }
+
+        @media (max-width: 980px) {
+            html,
+            body {
+                overflow: auto;
+            }
+
+            .app-shell {
+                height: auto;
+                min-height: 100%;
+                grid-template-columns: 1fr;
+                grid-template-rows: minmax(52vh, 66vh) auto;
+                gap: 10px;
+                padding: 10px;
+            }
+
+            .scene-wrap {
+                min-height: 52vh;
+            }
+
+            .panel {
+                padding-bottom: calc(16px + env(safe-area-inset-bottom));
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <section class="scene-wrap" aria-label="3D radar scene">
+            <div class="hud-title">LIDAR FIELD SCAN</div>
+            <div id="scene-container"></div>
+            <div class="scanlines"></div>
+        </section>
+
+        <aside class="panel" aria-label="Radar controls and status">
+            <h1>Radar Console</h1>
+            <p class="subtle">Real-time 3D telemetry stream</p>
+
+            <div class="metric">
+                <span class="metric-label">Current Angle</span>
+                <span id="angleValue" class="metric-value">0.0 deg</span>
+            </div>
+
+            <div class="metric">
+                <span class="metric-label">Distance</span>
+                <span id="distanceValue" class="metric-value">0.0 cm</span>
+            </div>
+
+            <div class="status-row">
+                <div id="modeValue" class="status-chip">mode: --</div>
+                <div id="countValue" class="status-chip">points: 0</div>
+            </div>
+
+            <button id="saveButton" type="button" aria-label="Save radar data as CSV">Save CSV Snapshot</button>
+
+            <div class="legend" aria-label="Distance heatmap legend">
+                <div class="legend-item"><span class="dot dot-near"></span>Near target</div>
+                <div class="legend-item"><span class="dot dot-mid"></span>Medium range</div>
+                <div class="legend-item"><span class="dot dot-far"></span>Far range</div>
+            </div>
+
+            <div id="errorValue" class="error"></div>
+        </aside>
+    </div>
+
+    <script>
+        window.RADAR_CONFIG = {
+            maxDistance: {{ max_distance|tojson }}
+        };
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.162.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

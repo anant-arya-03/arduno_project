@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: radar-3d-dashboard
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 120 wsgi:app
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: RADAR_SIMULATION
+        value: "true"
+      - key: RADAR_BUFFER_SIZE
+        value: "500"
+      - key: RADAR_MAX_DISTANCE
+        value: "250"
+      - key: RADAR_READ_INTERVAL
+        value: "0.03"
