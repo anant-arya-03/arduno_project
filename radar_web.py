@@ -328,16 +328,18 @@ def ingest():
         if token != INGEST_TOKEN:
             return jsonify({"ok": False, "error": "unauthorized"}), 401
 
-    payload = request.get_json(silent=True)
+    payload = None
 
-    # Some serverless adapters can pass JSON bodies in ways Flask does not auto-parse.
+    # Parse from raw body first for better compatibility with some serverless adapters.
+    raw_body = request.get_data(cache=True, as_text=True)
+    if raw_body:
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            payload = None
+
     if payload is None:
-        raw_body = request.get_data(cache=False, as_text=True)
-        if raw_body:
-            try:
-                payload = json.loads(raw_body)
-            except json.JSONDecodeError:
-                payload = None
+        payload = request.get_json(silent=True, force=True)
 
     if payload is None and request.form:
         candidate = request.form.get("payload") or request.form.get("data")
