@@ -20,7 +20,12 @@ except Exception:  # pragma: no cover
     serial = None
     SerialException = Exception
 
-app = Flask(__name__)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(
+    __name__,
+    template_folder=os.path.join(BASE_DIR, "templates"),
+    static_folder=os.path.join(BASE_DIR, "static"),
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("radar-web")
@@ -33,6 +38,12 @@ SERIAL_PORT = (os.getenv("SERIAL_PORT") or os.getenv("RADAR_SERIAL_PORT") or "")
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "9600"))
 SERIAL_TIMEOUT = float(os.getenv("SERIAL_TIMEOUT", "1"))
 SIMULATION_MODE = os.getenv("RADAR_SIMULATION", "auto").strip().lower()
+DISABLE_READER_THREAD = os.getenv("RADAR_DISABLE_READER_THREAD", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 points_lock = threading.Lock()
 radar_points = deque(maxlen=MAX_POINTS)
@@ -52,6 +63,8 @@ runtime_state = {
 
 stop_event = threading.Event()
 reader_thread: Optional[threading.Thread] = None
+serverless_state_lock = threading.Lock()
+serverless_sweep_angle = 0.0
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -76,6 +89,31 @@ def derive_intensity(distance: float, frequency: Optional[float]) -> float:
     if RADAR_MAX_DISTANCE <= 0:
         return 0.0
     return clamp(1.0 - (distance / RADAR_MAX_DISTANCE), 0.0, 1.0)
+
+
+def simulated_sample(angle: float, now: Optional[float] = None) -> Tuple[float, float, float, float]:
+    if now is None:
+        now = time.time()
+
+    base = RADAR_MAX_DISTANCE * 0.38
+    wave = RADAR_MAX_DISTANCE * 0.47 * (0.5 + 0.5 * math.sin(now * 1.8 + angle / 15.0))
+    jitter = random.uniform(-5.0, 5.0)
+    distance = clamp(base + wave + jitter, 5.0, RADAR_MAX_DISTANCE)
+
+    frequency = 30.0 + 60.0 * (0.5 + 0.5 * math.sin(now * 2.6 + angle / 28.0))
+    intensity = derive_intensity(distance, frequency)
+    return angle, distance, intensity, frequency
+
+
+def seed_serverless_point() -> None:
+    global serverless_sweep_angle
+
+    with serverless_state_lock:
+        angle = serverless_sweep_angle
+        serverless_sweep_angle = normalize_angle(serverless_sweep_angle + 2.5)
+
+    point = simulated_sample(angle)
+    add_point(*point)
 
 
 def parse_serial_line(line: str) -> Optional[Tuple[float, float, float, Optional[float]]]:
@@ -115,16 +153,7 @@ def run_simulation() -> None:
 
     sweep_angle = 0.0
     while not stop_event.is_set():
-        now = time.time()
-        base = RADAR_MAX_DISTANCE * 0.38
-        wave = RADAR_MAX_DISTANCE * 0.47 * (0.5 + 0.5 * math.sin(now * 1.8 + sweep_angle / 15.0))
-        jitter = random.uniform(-5.0, 5.0)
-        distance = clamp(base + wave + jitter, 5.0, RADAR_MAX_DISTANCE)
-
-        frequency = 30.0 + 60.0 * (0.5 + 0.5 * math.sin(now * 2.6 + sweep_angle / 28.0))
-        intensity = derive_intensity(distance, frequency)
-
-        add_point(sweep_angle, distance, intensity, frequency)
+        add_point(*simulated_sample(sweep_angle))
         sweep_angle = normalize_angle(sweep_angle + 2.5)
         time.sleep(READ_INTERVAL)
 
@@ -227,6 +256,11 @@ def index() -> str:
 
 @app.route("/data")
 def data():
+    if DISABLE_READER_THREAD:
+        runtime_state["mode"] = "simulation"
+        runtime_state["last_error"] = None
+        seed_serverless_point()
+
     with points_lock:
         snapshot = list(radar_points)
         current = dict(latest_point)
@@ -289,12 +323,17 @@ def health():
             "mode": runtime_state.get("mode", "unknown"),
             "bufferSize": len(radar_points),
             "serialConfigured": bool(SERIAL_PORT),
+            "readerThreadEnabled": not DISABLE_READER_THREAD,
         }
     )
 
 
 # Start reader at import time so production WSGI servers also receive live updates.
-start_reader_thread()
+if not DISABLE_READER_THREAD:
+    start_reader_thread()
+else:
+    runtime_state["mode"] = "simulation"
+    runtime_state["last_error"] = None
 
 
 if __name__ == "__main__":

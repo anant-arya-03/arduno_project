@@ -9,7 +9,7 @@ A full-stack radar dashboard built with Flask + Three.js.
 - 3D radar visualization with sweep beam, pulsing waves, glow points, and heatmap colors
 - CSV snapshot export from `/save`
 - Mobile-responsive dashboard
-- Cloud-ready deployment on Render (simulation mode by default)
+- Cloud-ready deployment on Render and Vercel (simulation mode by default)
 
 ## Project Structure
 
@@ -19,6 +19,7 @@ A full-stack radar dashboard built with Flask + Three.js.
 - `radar.py` - serial/simulation stream inspector utility
 - `requirements.txt` - Python dependencies
 - `render.yaml` - Render Blueprint deployment config
+- `vercel.json` - Vercel routing and build config
 - `Procfile` - process entry for PaaS platforms
 - `arduino/radar_sender/radar_sender.ino` - sample Arduino sketch
 
@@ -109,6 +110,33 @@ Default cloud setup runs in simulation mode (`RADAR_SIMULATION=true`).
 Note: Gunicorn is for Linux hosts (Render, Fly, Railway Linux images, VPS Linux).
 
 Set environment variables as needed from `.env.example`.
+
+## Deploy to Vercel
+
+Vercel deployment uses serverless mode, so the app automatically enables:
+
+- `RADAR_SIMULATION=true`
+- `RADAR_DISABLE_READER_THREAD=true`
+
+### Option A: Vercel Dashboard
+
+1. Import your GitHub repository into Vercel.
+2. Keep framework preset as **Other**.
+3. Deploy.
+
+### Option B: Vercel CLI
+
+```powershell
+npm install -g vercel
+vercel
+vercel --prod
+```
+
+After deploy, verify:
+
+- `/health`
+- `/data`
+- `/save`
 
 ## Production Notes
 
