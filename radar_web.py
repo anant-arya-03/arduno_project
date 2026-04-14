@@ -1,6 +1,7 @@
 import atexit
 import csv
 import io
+import json
 import logging
 import math
 import os
@@ -328,6 +329,24 @@ def ingest():
             return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     payload = request.get_json(silent=True)
+
+    # Some serverless adapters can pass JSON bodies in ways Flask does not auto-parse.
+    if payload is None:
+        raw_body = request.get_data(cache=False, as_text=True)
+        if raw_body:
+            try:
+                payload = json.loads(raw_body)
+            except json.JSONDecodeError:
+                payload = None
+
+    if payload is None and request.form:
+        candidate = request.form.get("payload") or request.form.get("data")
+        if candidate:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                payload = None
+
     if payload is None:
         return jsonify({"ok": False, "error": "invalid_json"}), 400
 

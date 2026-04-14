@@ -9,13 +9,14 @@ or
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
 import statistics
 import time
 from collections import defaultdict, deque
-from typing import Deque, Dict, Generator, Iterable, List, Optional
+from typing import Deque, Dict, Generator, Iterable, List, Optional, Tuple
 
 import requests
 
@@ -250,7 +251,11 @@ class PointCalibrator:
         return transformed
 
     def _transform_distance(self, distance: float) -> Optional[float]:
+        if not math.isfinite(distance):
+            return None
         corrected = (distance * self.distance_scale) + self.distance_offset
+        if not math.isfinite(corrected):
+            return None
         if corrected < self.distance_min or corrected > self.distance_max:
             return None
         return corrected
@@ -258,9 +263,13 @@ class PointCalibrator:
     def apply(self, point: Dict[str, float]) -> Optional[Dict[str, float]]:
         raw_angle = float(point.get("angle", 0.0))
         raw_distance = float(point.get("distance", 0.0))
+        if not math.isfinite(raw_angle) or not math.isfinite(raw_distance):
+            return None
         now = time.time()
 
         angle = self._transform_angle(raw_angle)
+        if not math.isfinite(angle):
+            return None
         distance = self._transform_distance(raw_distance)
         if distance is None:
             return None
@@ -319,13 +328,19 @@ def parse_serial_point(line: str) -> Optional[Dict[str, float]]:
         angle = float(parts[0]) % 360.0
         distance = max(0.0, float(parts[1]))
 
+        if not math.isfinite(angle) or not math.isfinite(distance):
+            return None
+
         point: Dict[str, float] = {
             "angle": round(angle, 2),
             "distance": round(distance, 2),
         }
 
         if len(parts) >= 3 and parts[2] != "":
-            point["frequency"] = round(float(parts[2]), 2)
+            frequency = float(parts[2])
+            if not math.isfinite(frequency):
+                return None
+            point["frequency"] = round(frequency, 2)
 
         return point
     except ValueError:
@@ -363,15 +378,22 @@ def post_points(
     points: List[Dict[str, float]],
     http_timeout: float,
     verbose: bool,
-) -> bool:
+) -> Tuple[bool, bool]:
     headers = {}
     if token:
         headers["X-Radar-Token"] = token
+    headers["Content-Type"] = "application/json"
+
+    try:
+        body = json.dumps({"points": points}, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        print(f"POST dropped invalid payload error={exc}")
+        return False, True
 
     try:
         response = requests.post(
             endpoint,
-            json={"points": points},
+            data=body,
             headers=headers,
             timeout=http_timeout,
         )
@@ -379,13 +401,17 @@ def post_points(
             if verbose:
                 payload = response.json()
                 print(f"POST ok accepted={payload.get('accepted')} dropped={payload.get('dropped')}")
-            return True
+            return True, False
+
+        if 400 <= response.status_code < 500:
+            print(f"POST dropped status={response.status_code} body={response.text[:160]}")
+            return False, True
 
         print(f"POST failed status={response.status_code} body={response.text[:160]}")
-        return False
+        return False, False
     except requests.RequestException as exc:
         print(f"POST failed error={exc}")
-        return False
+        return False, False
 
 
 def main() -> int:
@@ -416,6 +442,7 @@ def main() -> int:
     last_stat_log = time.time()
     total_points_sent = 0
     total_batches_sent = 0
+    total_points_dropped = 0
 
     print(f"Sending to {args.endpoint}")
     if args.token:
@@ -450,7 +477,9 @@ def main() -> int:
             if not should_flush:
                 continue
 
-            if post_points(args.endpoint, args.token, buffer, args.http_timeout, args.verbose):
+            sent_ok, dropped_bad = post_points(args.endpoint, args.token, buffer, args.http_timeout, args.verbose)
+
+            if sent_ok:
                 total_points_sent += len(buffer)
                 total_batches_sent += 1
                 buffer.clear()
@@ -461,9 +490,14 @@ def main() -> int:
                         "stream ok "
                         + f"batches={total_batches_sent} "
                         + f"points={total_points_sent} "
+                        + f"dropped={total_points_dropped} "
                         + f"servoMode={calibrator.current_servo_mode()}"
                     )
                     last_stat_log = now
+            elif dropped_bad:
+                total_points_dropped += len(buffer)
+                buffer.clear()
+                last_flush = now
             else:
                 time.sleep(0.5)
                 if len(buffer) > batch_size * 30:
